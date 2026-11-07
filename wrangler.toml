@@ -1,0 +1,19 @@
+name = "kwania-tv-api"
+main = "worker/index.js"
+compatibility_date = "2026-11-07"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+FRONTEND_ORIGIN = "https://YOUR-PAGES-SITE.pages.dev"
+MEDIA_BASE_URL = "https://media.YOURDOMAIN.com"
+R2_ACCOUNT_ID = "YOUR_CLOUDFLARE_ACCOUNT_ID"
+R2_BUCKET_NAME = "kwania-tv-media"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "kwania-tv-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "kwania-tv-media"

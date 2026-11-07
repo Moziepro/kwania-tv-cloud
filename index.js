@@ -1,0 +1,144 @@
+import { AwsClient } from "aws4fetch";
+
+const json = (data, status=200, headers={}) => new Response(JSON.stringify(data), {
+  status, headers: {"content-type":"application/json; charset=utf-8", ...headers}
+});
+const uuid = () => crypto.randomUUID();
+const b64 = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)));
+const enc = (s) => new TextEncoder().encode(s);
+
+function cors(request, env) {
+  const origin = request.headers.get("Origin") || "";
+  const allowed = env.FRONTEND_ORIGIN || "";
+  return {
+    "Access-Control-Allow-Origin": origin === allowed ? origin : allowed,
+    "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type,Authorization",
+    "Access-Control-Max-Age": "86400",
+    "Vary": "Origin"
+  };
+}
+async function signToken(payload, secret) {
+  const key = await crypto.subtle.importKey("raw", enc(secret), {name:"HMAC",hash:"SHA-256"}, false, ["sign"]);
+  const body = btoa(unescape(encodeURIComponent(JSON.stringify(payload)))).replace(/=/g,"").replace(/\+/g,"-").replace(/\//g,"_");
+  const sig = b64(await crypto.subtle.sign("HMAC", key, enc(body))).replace(/=/g,"").replace(/\+/g,"-").replace(/\//g,"_");
+  return `${body}.${sig}`;
+}
+async function validToken(token, secret) {
+  try {
+    const [body,sig] = token.split(".");
+    const key = await crypto.subtle.importKey("raw", enc(secret), {name:"HMAC",hash:"SHA-256"}, false, ["verify"]);
+    const raw = Uint8Array.from(atob(sig.replace(/-/g,"+").replace(/_/g,"/")), c=>c.charCodeAt(0));
+    const ok = await crypto.subtle.verify("HMAC", key, raw, enc(body));
+    if (!ok) return false;
+    const payload = JSON.parse(decodeURIComponent(escape(atob(body.replace(/-/g,"+").replace(/_/g,"/")))));
+    return payload.exp > Date.now();
+  } catch { return false; }
+}
+async function admin(request, env) {
+  const token = (request.headers.get("Authorization") || "").replace(/^Bearer\s+/i,"");
+  return !!(token && env.ADMIN_SECRET && await validToken(token, env.ADMIN_SECRET));
+}
+async function presignPut(env, key, contentType) {
+  const endpoint = `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${env.R2_BUCKET_NAME}/${key}`;
+  const url = new URL(endpoint);
+  url.searchParams.set("X-Amz-Expires","3600");
+  const client = new AwsClient({
+    accessKeyId: env.R2_ACCESS_KEY_ID,
+    secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+    service: "s3",
+    region: "auto"
+  });
+  const signed = await client.sign(new Request(url, {
+    method:"PUT", headers:{"Content-Type":contentType}
+  }), {aws:{signQuery:true, allHeaders:true}});
+  return signed.url;
+}
+function playlistState(videos, anchor, now) {
+  if (!videos.length) return {videos:[], current:null, next:null, guide:[]};
+  const total = videos.reduce((n,v)=>n+Math.max(1,Number(v.duration)||1),0);
+  const start = anchor > 0 ? anchor : now;
+  const elapsed = Math.max(0,(now-start)/1000);
+  let offset = elapsed % total, index = 0;
+  while (index < videos.length-1 && offset >= videos[index].duration) {
+    offset -= videos[index].duration; index++;
+  }
+  const current = {...videos[index], offset:Math.floor(offset)};
+  const next = videos[(index+1)%videos.length];
+  let cursor = now - current.offset*1000;
+  const guide = [];
+  let i=index;
+  for(let n=0;n<Math.min(videos.length*2,20);n++){
+    const v=videos[i];
+    guide.push({id:v.id,title:v.title,category:v.category,start_ms:cursor,end_ms:cursor+v.duration*1000,active:n===0});
+    cursor += v.duration*1000; i=(i+1)%videos.length;
+  }
+  return {videos, current, next, guide, server_time:now, anchor_ms:start};
+}
+export default {
+ async fetch(request, env) {
+  const headers = cors(request,env);
+  if (request.method==="OPTIONS") return new Response(null,{status:204,headers});
+  const url = new URL(request.url), path=url.pathname;
+  try {
+   if (path==="/api/health" && request.method==="GET") return json({ok:true,service:"Kwania TV Cloud API"},200,headers);
+   if (path==="/api/playlist" && request.method==="GET") {
+    const rows=await env.DB.prepare("SELECT id,title,category,duration,object_key,position FROM videos ORDER BY position ASC, created_at ASC").all();
+    const anchorRow=await env.DB.prepare("SELECT value FROM settings WHERE key='anchor_ms'").first();
+    const videos=(rows.results||[]).map(v=>({...v, url:`${env.MEDIA_BASE_URL}/${v.object_key}`}));
+    return json(playlistState(videos,Number(anchorRow?.value||0),Date.now()),200,headers);
+   }
+   if (path==="/api/admin/login" && request.method==="POST") {
+    const body=await request.json();
+    if (!env.ADMIN_PASSWORD || body.password!==env.ADMIN_PASSWORD) return json({error:"Incorrect password"},401,headers);
+    const token=await signToken({exp:Date.now()+12*60*60*1000},env.ADMIN_SECRET);
+    return json({token,expires_in:43200},200,headers);
+   }
+   if (path.startsWith("/api/admin/")) {
+    if (!(await admin(request,env))) return json({error:"Please log in again"},401,headers);
+    if (path==="/api/admin/upload-url" && request.method==="POST") {
+      const b=await request.json();
+      const allowed=["video/mp4","video/quicktime","video/webm"];
+      if (!b.title || !b.mime_type || !allowed.includes(b.mime_type) || !Number.isFinite(b.duration) || b.duration<=0 || !Number.isFinite(b.file_size) || b.file_size<=0)
+        return json({error:"Enter a title and choose a supported video with a valid duration."},400,headers);
+      const id=uuid(), key=`programmes/${id}.${b.mime_type==="video/webm"?"webm":b.mime_type==="video/quicktime"?"mov":"mp4"}`;
+      const upload_url=await presignPut(env,key,b.mime_type);
+      return json({id,key,upload_url},200,headers);
+    }
+    if (path==="/api/admin/complete" && request.method==="POST") {
+      const b=await request.json();
+      if (!String(b.key||"").startsWith("programmes/") || !b.title || !Number.isFinite(b.duration)) return json({error:"Invalid video details"},400,headers);
+      const exists=await env.MEDIA.head(b.key);
+      if (!exists) return json({error:"Upload was not found in storage"},400,headers);
+      const last=await env.DB.prepare("SELECT COALESCE(MAX(position),-1) AS p FROM videos").first();
+      await env.DB.prepare("INSERT INTO videos(id,object_key,title,category,duration,mime_type,file_size,position,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
+       .bind(b.id,b.key,String(b.title).slice(0,120),String(b.category||"Entertainment").slice(0,50),b.duration,b.mime_type||"video/mp4",b.file_size||exists.size,(last?.p??-1)+1,Date.now()).run();
+      return json({ok:true},200,headers);
+    }
+    if (path==="/api/admin/videos" && request.method==="GET") {
+      const rows=await env.DB.prepare("SELECT id,title,category,duration,file_size,position FROM videos ORDER BY position,created_at").all();
+      return json({videos:rows.results||[]},200,headers);
+    }
+    if (path.startsWith("/api/admin/videos/") && request.method==="DELETE") {
+      const id=path.split("/").pop();
+      const row=await env.DB.prepare("SELECT object_key FROM videos WHERE id=?").bind(id).first();
+      if(row){await env.MEDIA.delete(row.object_key);await env.DB.prepare("DELETE FROM videos WHERE id=?").bind(id).run();}
+      return json({ok:true},200,headers);
+    }
+    if (path==="/api/admin/reorder" && request.method==="POST") {
+      const {ids}=await request.json();
+      if(!Array.isArray(ids)) return json({error:"Expected ids array"},400,headers);
+      for(let i=0;i<ids.length;i++) await env.DB.prepare("UPDATE videos SET position=? WHERE id=?").bind(i,ids[i]).run();
+      return json({ok:true},200,headers);
+    }
+    if (path==="/api/admin/anchor" && request.method==="POST") {
+      const {anchor_ms}=await request.json();
+      const value=Number(anchor_ms)||Date.now();
+      await env.DB.prepare("INSERT INTO settings(key,value) VALUES('anchor_ms',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(String(value)).run();
+      return json({ok:true,anchor_ms:value},200,headers);
+    }
+   }
+   return json({error:"Not found"},404,headers);
+  } catch(e) { return json({error:e.message||"Server error"},500,headers); }
+ }
+};
