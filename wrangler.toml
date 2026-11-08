@@ -6,7 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 FRONTEND_ORIGIN = "https://kwania-tv-web.pages.dev"
 MEDIA_BASE_URL = "https://pub-555a0f903fd04080a80ca7ed7cf20b51.r2.dev"
-R2_ACCOUNT_ID = "YOUR_CLOUDFLARE_ACCOUNT_ID"
+R2_ACCOUNT_ID = "373662cfb654972e9805e5339650cbc9"
 R2_BUCKET_NAME = "kwania-tv-media"
 
 [[d1_databases]]
