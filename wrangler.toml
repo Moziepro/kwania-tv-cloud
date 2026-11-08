@@ -12,7 +12,7 @@ R2_BUCKET_NAME = "kwania-tv-media"
 [[d1_databases]]
 binding = "DB"
 database_name = "kwania-tv-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "5b23147c-bbff-4ea6-a81a-ddca80691f51"
 
 [[r2_buckets]]
 binding = "MEDIA"
