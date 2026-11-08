@@ -65,3 +65,4 @@ Upload the contents of the `public` folder to your GitHub repository and connect
 - Large files: this starter uses a single presigned PUT. Cloudflare R2 supports multipart uploads for large videos; implement multipart/resumable upload if you need very large files or unreliable mobile connections.
 - Video formats/codecs matter. H.264 video + AAC audio in MP4 offers broad browser compatibility.
 - Cloudflare R2 charges may apply for storage and operations; check current Cloudflare pricing. R2 has no egress bandwidth charge according to its pricing model, but storage and operations are not unlimited free.
+Kwania TV backend deployment build 1
